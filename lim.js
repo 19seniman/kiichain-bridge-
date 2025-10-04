@@ -1,5 +1,5 @@
 const { SigningStargateClient } = require('@cosmjs/stargate');
-// Mengubah impor. Ini adalah cara yang benar untuk mendapatkan fungsi dariMnemonic
+// Menggunakan cara impor yang sama, ini harusnya bekerja di Node.js modern
 const { Secp256k1HdWallet } = require('@cosmjs/proto-signing'); 
 const fs = require('fs');
 const readline = require('readline-sync');
@@ -35,8 +35,9 @@ async function runIbcTransferBot(amountToken, totalIterations) {
         return;
     }
 
-    // PERBAIKAN KRITIS UNTUK TYPERROR: Menggunakan Secp256k1HdWallet
     try {
+        // PERBAIKAN KRITIS UNTUK TYPERROR: Menggunakan Secp256k1HdWallet
+        // Jika eror berlanjut, berarti masalah ada pada cache Node.js atau versi library
         const wallet = await Secp256k1HdWallet.fromMnemonic(
             GLOBAL_CONFIG.PRIVATE_KEY, 
             { prefix: 'kii' } // Ganti 'kii' jika prefix chain Anda berbeda
@@ -44,7 +45,7 @@ async function runIbcTransferBot(amountToken, totalIterations) {
         const [firstAccount] = await wallet.getAccounts();
         const senderAddress = firstAccount.address;
 
-        // Asumsi 6 desimal (umum di Cosmos, GANTI jika KII menggunakan 18 desimal)
+        // Asumsi 6 desimal (umum di Cosmos)
         const amountWei = BigInt(Math.floor(amountToken * 10**6)); 
         const amountToTransfer = [{ denom: config.sourceDenom, amount: amountWei.toString() }];
 
@@ -87,7 +88,6 @@ async function runIbcTransferBot(amountToken, totalIterations) {
                 }
 
             } catch (error) {
-                // Menangkap eror kritis (saldo kurang, node mati, dll.)
                 console.error(`❌ Transaksi #${i}: GAGAL KRITIS. Error: ${error.message}`);
                 await new Promise(resolve => setTimeout(resolve, 3000));
             }
