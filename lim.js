@@ -1,5 +1,6 @@
-const { SigningStargateClient, StdFee } = require('@cosmjs/stargate');
-const { DirectSecp256k1Wallet } = require('@cosmjs/proto-signing');
+const { SigningStargateClient } = require('@cosmjs/stargate');
+// PERUBAHAN DI SINI: Mengganti DirectSecp256k1Wallet
+const { Secp256k1HdWallet } = require('@cosmjs/proto-signing'); 
 const fs = require('fs');
 const readline = require('readline-sync');
 require('dotenv').config();
@@ -37,8 +38,8 @@ async function runIbcTransferBot(amountToken, totalIterations) {
         return;
     }
 
-    // Inisialisasi Wallet
-    const wallet = await DirectSecp256k1Wallet.fromMnemonic(GLOBAL_CONFIG.PRIVATE_KEY, { prefix: 'kii' }); // Ganti prefix jika perlu
+    // PERUBAHAN DI SINI: Menggunakan Secp256k1HdWallet
+    const wallet = await Secp256k1HdWallet.fromMnemonic(GLOBAL_CONFIG.PRIVATE_KEY, { prefix: 'kii' }); 
     const [firstAccount] = await wallet.getAccounts();
     const senderAddress = firstAccount.address;
 
@@ -46,7 +47,8 @@ async function runIbcTransferBot(amountToken, totalIterations) {
         // Koneksi ke Source Chain
         const client = await SigningStargateClient.connectWithSigner(config.sourceRpc, wallet);
         
-        const amountWei = BigInt(Math.floor(amountToken * 10**6)); // Asumsi 6 desimal (umum di Cosmos)
+        // Asumsi 6 desimal (umum di Cosmos, GANTI jika KII menggunakan 18 desimal)
+        const amountWei = BigInt(Math.floor(amountToken * 10**6)); 
         const amountToTransfer = [{ denom: config.sourceDenom, amount: amountWei.toString() }];
         
         console.log(`\n======================================================`);
@@ -59,9 +61,9 @@ async function runIbcTransferBot(amountToken, totalIterations) {
             const timeoutInSeconds = 60 * 10; // 10 menit
             const timeoutTimestamp = Math.floor(Date.now() / 1000) + timeoutInSeconds;
             
-            // Biaya Transaksi (Asumsi biaya minimum)
+            // Biaya Transaksi
             const fee = {
-                amount: [{ denom: config.feeDenom, amount: '5000' }], // Ganti dengan biaya yang sesuai
+                amount: [{ denom: config.feeDenom, amount: '5000' }], 
                 gas: '250000',
             };
 
@@ -84,13 +86,11 @@ async function runIbcTransferBot(amountToken, totalIterations) {
                     console.log(`🎉 Transaksi #${i}: BERHASIL! Tx Hash: ${tx.hash}`);
                 } else {
                     console.error(`❌ Transaksi #${i}: GAGAL ON-CHAIN. Code: ${tx.code}. Log: ${tx.rawLog}`);
-                    // Tetap lanjutkan ke iterasi berikutnya
                 }
 
             } catch (error) {
-                // Menangkap eror sebelum transaksi masuk blok (misal: saldo kurang, node mati)
+                // Menangkap eror kritis (saldo kurang, node mati, dll.)
                 console.error(`❌ Transaksi #${i}: GAGAL KRITIS. Error: ${error.message}`);
-                // Memberi jeda kecil agar tidak membanjiri node RPC
                 await new Promise(resolve => setTimeout(resolve, 3000));
             }
         }
