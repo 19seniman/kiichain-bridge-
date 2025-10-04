@@ -1,119 +1,112 @@
-const { ethers } = require('ethers');
+const { SigningStargateClient, StdFee } = require('@cosmjs/stargate');
+const { DirectSecp256k1Wallet } = require('@cosmjs/proto-signing');
 const fs = require('fs');
-const readline = require('readline-sync'); // Modul baru untuk input
+const readline = require('readline-sync');
 require('dotenv').config();
 
-// --- 1. KONFIGURASI JARINGAN EVM (Kii Testnet Oro) ---
-const EVM_CONFIG = {
-    RPC_URL: 'https://json-rpc.uno.sentry.testnet.v3.kiivalidator.com/',
-    CHAIN_ID: 1336,
-    BRIDGE_CONTRACT_ADDRESS: '0x0000000000000000000000000000000000001002', 
-    IBC_CHANNEL_ID: 'channel-1', 
-};
-
-// --- 2. KONFIGURASI GLOBAL ---
+// --- 1. KONFIGURASI GLOBAL ---
 const GLOBAL_CONFIG = {
-    PRIVATE_KEY: process.env.PRIVATE_KEY, 
-    COSMOS_CONFIG_FILE: 'cosmos.json',
+    PRIVATE_KEY: process.env.PRIVATE_KEY, // Mnemonic (atau kunci pribadi hex)
+    CONFIG_FILE: 'cosmos.json',
 };
 
-// --- 3. ABI IBC EVM MINIMALIS (Asumsi Gagal) ---
-const IBC_ABI_MINIMAL = [
-    "function transfer(string recipient, string channelId, uint64 timeoutTimestamp)"
-];
-
-/**
- * Fungsi untuk memuat alamat tujuan dari file JSON.
- */
-function loadCosmosRecipient() {
+// --- 2. FUNGSI MEMUAT KONFIGURASI ---
+function loadCosmosConfig() {
     try {
-        const data = fs.readFileSync(GLOBAL_CONFIG.COSMOS_CONFIG_FILE, 'utf8');
+        const data = fs.readFileSync(GLOBAL_CONFIG.CONFIG_FILE, 'utf8');
         const config = JSON.parse(data);
-        const recipient = config.recipientAddress;
         
-        if (!recipient || recipient.startsWith('kii1...')) {
-            throw new Error("Alamat tujuan di cosmos.json belum valid.");
+        // Cek semua nilai penting
+        if (!config.recipientAddress || !config.sourceRpc || !config.sourceChainId || !config.ibcChannelId) {
+            throw new Error("Satu atau lebih konfigurasi di cosmos.json tidak lengkap atau salah.");
         }
-        return recipient;
+        return config;
     } catch (error) {
         console.error(`🚨 GAGAL memuat konfigurasi: ${error.message}`);
-        process.exit(1); 
+        process.exit(1);
     }
 }
 
-// ---
-async function bridgeEVMToCosmos(amountToken, totalIterations) {
-    const cosmosRecipientAddress = loadCosmosRecipient();
-    if (!GLOBAL_CONFIG.PRIVATE_KEY) return;
+/**
+ * Fungsi utama untuk melakukan transfer IBC
+ */
+async function runIbcTransferBot(amountToken, totalIterations) {
+    const config = loadCosmosConfig();
+    if (!GLOBAL_CONFIG.PRIVATE_KEY) {
+        console.error("🚨 Kunci pribadi (PRIVATE_KEY) tidak ditemukan di .env. Harap periksa!");
+        return;
+    }
+
+    // Inisialisasi Wallet
+    const wallet = await DirectSecp256k1Wallet.fromMnemonic(GLOBAL_CONFIG.PRIVATE_KEY, { prefix: 'kii' }); // Ganti prefix jika perlu
+    const [firstAccount] = await wallet.getAccounts();
+    const senderAddress = firstAccount.address;
 
     try {
-        const provider = new ethers.JsonRpcProvider(EVM_CONFIG.RPC_URL, EVM_CONFIG.CHAIN_ID);
-        const wallet = new ethers.Wallet(GLOBAL_CONFIG.PRIVATE_KEY, provider);
-        const ibcContract = new ethers.Contract(EVM_CONFIG.BRIDGE_CONTRACT_ADDRESS, IBC_ABI_MINIMAL, wallet);
+        // Koneksi ke Source Chain
+        const client = await SigningStargateClient.connectWithSigner(config.sourceRpc, wallet);
         
-        const senderAddress = await wallet.getAddress();
-        const amountWei = ethers.parseUnits(String(amountToken), 'ether');
+        const amountWei = BigInt(Math.floor(amountToken * 10**6)); // Asumsi 6 desimal (umum di Cosmos)
+        const amountToTransfer = [{ denom: config.sourceDenom, amount: amountWei.toString() }];
         
         console.log(`\n======================================================`);
-        console.log(`✅ BOT DIMULAI: ${totalIterations}x Transfer @ ${amountToken} KII`);
+        console.log(`✅ BOT IBC DIMULAI: ${totalIterations}x Transfer @ ${amountToken} ${config.sourceDenom}`);
         console.log(`Pengirim: ${senderAddress}`);
-        console.log(`Kontrak: ${EVM_CONFIG.BRIDGE_CONTRACT_ADDRESS}`);
+        console.log(`Tujuan: ${config.destinationChainId} melalui ${config.ibcChannelId}`);
         console.log(`======================================================`);
 
         for (let i = 1; i <= totalIterations; i++) {
-            const timeoutInSeconds = 60 * 10;
-            const timeoutTimestamp = BigInt(Math.floor(Date.now() / 1000) + timeoutInSeconds);
+            const timeoutInSeconds = 60 * 10; // 10 menit
+            const timeoutTimestamp = Math.floor(Date.now() / 1000) + timeoutInSeconds;
             
-            console.log(`\n---> Mulai Transaksi #${i} dari ${totalIterations}...`);
+            // Biaya Transaksi (Asumsi biaya minimum)
+            const fee = {
+                amount: [{ denom: config.feeDenom, amount: '5000' }], // Ganti dengan biaya yang sesuai
+                gas: '250000',
+            };
+
+            console.log(`\n---> Mulai Transaksi IBC #${i} dari ${totalIterations}...`);
 
             try {
-                // PANGGILAN KONTRAK YANG SANGAT MUNGKIN GAGAL
-                const tx = await ibcContract.transfer(
-                    cosmosRecipientAddress,
-                    EVM_CONFIG.IBC_CHANNEL_ID,
-                    timeoutTimestamp,
-                    { 
-                        value: amountWei, 
-                        gasLimit: 500000 
-                    } 
+                // Melakukan transfer IBC native (IBC ICS-20)
+                const tx = await client.sendIbcTokens(
+                    senderAddress,
+                    config.recipientAddress,
+                    amountToTransfer,
+                    config.sourceDenom,
+                    config.ibcChannelId,
+                    timeoutTimestamp, // Timestamp dalam detik
+                    fee,
+                    `Auto IBC Transfer #${i}`
                 );
 
-                console.log(`⏳ Transaksi terkirim. Hash: ${tx.hash}`);
-                const receipt = await tx.wait();
-                
-                if (receipt.status === 1) {
-                    console.log(`🎉 Transaksi #${i}: BERHASIL! Tx Hash: ${receipt.hash}`);
+                if (tx.code === 0) {
+                    console.log(`🎉 Transaksi #${i}: BERHASIL! Tx Hash: ${tx.hash}`);
                 } else {
-                    // Jika dikirim tapi status = 0 (revert)
-                    console.error(`❌ Transaksi #${i}: GAGAL REVERT (Status 0). Gas habis!`);
-                    // Bot tetap melanjutkan ke iterasi berikutnya
+                    console.error(`❌ Transaksi #${i}: GAGAL ON-CHAIN. Code: ${tx.code}. Log: ${tx.rawLog}`);
+                    // Tetap lanjutkan ke iterasi berikutnya
                 }
 
             } catch (error) {
-                // Menangkap eror sebelum transaksi masuk blok (misal: RPC down, gas estimation error)
-                if (error.code === 'CALL_EXCEPTION') {
-                    console.error(`❌ Transaksi #${i}: GAGAL KRITIS (REVERT). Lanjut ke iterasi berikutnya.`);
-                    // Bot mengabaikan eror CALL_EXCEPTION dan melanjutkan
-                } else {
-                    console.error(`❌ Transaksi #${i}: GAGAL (Kode: ${error.code}). Coba lagi.`, error.message);
-                    // Bot tetap melanjutkan ke iterasi berikutnya
-                }
+                // Menangkap eror sebelum transaksi masuk blok (misal: saldo kurang, node mati)
+                console.error(`❌ Transaksi #${i}: GAGAL KRITIS. Error: ${error.message}`);
+                // Memberi jeda kecil agar tidak membanjiri node RPC
+                await new Promise(resolve => setTimeout(resolve, 3000));
             }
         }
         console.log("\n======================================================");
         console.log("✅ Semua iterasi transaksi selesai.");
         console.log("======================================================");
 
-
     } catch (error) {
-        console.error('❌ Terjadi Kesalahan Kritis Saat Inisialisasi Bot:', error.message);
+        console.error('❌ Terjadi Kesalahan Kritis Saat Koneksi/Inisialisasi:', error.message);
     }
 }
 
 // --- MENU UTAMA ---
 function startBotMenu() {
-    console.log("--- Bot Bridge Kii Chain IBC ---");
-    const amount = readline.questionFloat("Masukkan jumlah token KII per transaksi: ");
+    console.log("--- Bot Transfer IBC Cosmos Native ---");
+    const amount = readline.questionFloat("Masukkan jumlah token (misal: 1.5) per transaksi: ");
     const times = readline.questionInt("Masukkan berapa kali transaksi diulang: ");
 
     if (amount <= 0 || times <= 0) {
@@ -121,7 +114,7 @@ function startBotMenu() {
         return;
     }
 
-    bridgeEVMToCosmos(amount, times);
+    runIbcTransferBot(amount, times);
 }
 
 startBotMenu();
