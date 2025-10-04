@@ -1,3 +1,9 @@
 {
-    "recipientAddress": "kii1..."
+    "recipientAddress": "osmosis1...", 
+    "sourceRpc": "https://rpc.kiichain.io:443", 
+    "sourceChainId": "kiichain-1",
+    "destinationChainId": "osmosis-1",
+    "ibcChannelId": "channel-X", 
+    "sourceDenom": "ukii", 
+    "feeDenom": "ukii"
 }
