@@ -1,5 +1,6 @@
 const { ethers } = require('ethers');
 const fs = require('fs');
+const readline = require('readline-sync'); // Modul baru untuk input
 require('dotenv').config();
 
 // --- 1. KONFIGURASI JARINGAN EVM (Kii Testnet Oro) ---
@@ -10,21 +11,19 @@ const EVM_CONFIG = {
     IBC_CHANNEL_ID: 'channel-1', 
 };
 
-// --- 2. KONFIGURASI TRANSAKSI BRIDGE ---
+// --- 2. KONFIGURASI GLOBAL ---
 const GLOBAL_CONFIG = {
     PRIVATE_KEY: process.env.PRIVATE_KEY, 
-    AMOUNT_TO_SEND_EVM: '0.1', 
     COSMOS_CONFIG_FILE: 'cosmos.json',
 };
 
-// --- 3. ABI IBC EVM MINIMALIS (PERCOBAAN TERAKHIR) ---
+// --- 3. ABI IBC EVM MINIMALIS (Asumsi Gagal) ---
 const IBC_ABI_MINIMAL = [
-    // Asumsi: Kontrak membaca port 'transfer' secara internal dan denom 'KII' sebagai value
     "function transfer(string recipient, string channelId, uint64 timeoutTimestamp)"
 ];
 
 /**
- * Fungsi untuk memuat alamat tujuan dari file JSON. (Sama seperti sebelumnya)
+ * Fungsi untuk memuat alamat tujuan dari file JSON.
  */
 function loadCosmosRecipient() {
     try {
@@ -43,7 +42,7 @@ function loadCosmosRecipient() {
 }
 
 // ---
-async function bridgeEVMToCosmos() {
+async function bridgeEVMToCosmos(amountToken, totalIterations) {
     const cosmosRecipientAddress = loadCosmosRecipient();
     if (!GLOBAL_CONFIG.PRIVATE_KEY) return;
 
@@ -53,40 +52,76 @@ async function bridgeEVMToCosmos() {
         const ibcContract = new ethers.Contract(EVM_CONFIG.BRIDGE_CONTRACT_ADDRESS, IBC_ABI_MINIMAL, wallet);
         
         const senderAddress = await wallet.getAddress();
-        const amountWei = ethers.parseUnits(GLOBAL_CONFIG.AMOUNT_TO_SEND_EVM, 'ether');
+        const amountWei = ethers.parseUnits(String(amountToken), 'ether');
         
-        const timeoutInSeconds = 60 * 10; // 10 menit
-        const timeoutTimestamp = BigInt(Math.floor(Date.now() / 1000) + timeoutInSeconds); // Dalam detik (uint64)
+        console.log(`\n======================================================`);
+        console.log(`✅ BOT DIMULAI: ${totalIterations}x Transfer @ ${amountToken} KII`);
+        console.log(`Pengirim: ${senderAddress}`);
+        console.log(`Kontrak: ${EVM_CONFIG.BRIDGE_CONTRACT_ADDRESS}`);
+        console.log(`======================================================`);
 
-        console.log(`✅ Terhubung. Pengirim: ${senderAddress}`);
-        console.log(`⏳ Mencoba IBC Transfer Minimalis ke ${EVM_CONFIG.IBC_CHANNEL_ID}...`);
+        for (let i = 1; i <= totalIterations; i++) {
+            const timeoutInSeconds = 60 * 10;
+            const timeoutTimestamp = BigInt(Math.floor(Date.now() / 1000) + timeoutInSeconds);
+            
+            console.log(`\n---> Mulai Transaksi #${i} dari ${totalIterations}...`);
 
-        // --- Panggilan Fungsi IBC Kontrak dengan Parameter Minimalis ---
-        const tx = await ibcContract.transfer(
-            cosmosRecipientAddress,
-            EVM_CONFIG.IBC_CHANNEL_ID,
-            timeoutTimestamp,
-            { 
-                value: amountWei, // Mengirim KII natif sebagai value
-                gasLimit: 500000 
-            } 
-        );
+            try {
+                // PANGGILAN KONTRAK YANG SANGAT MUNGKIN GAGAL
+                const tx = await ibcContract.transfer(
+                    cosmosRecipientAddress,
+                    EVM_CONFIG.IBC_CHANNEL_ID,
+                    timeoutTimestamp,
+                    { 
+                        value: amountWei, 
+                        gasLimit: 500000 
+                    } 
+                );
 
-        console.log(`⏳ Transaksi IBC terkirim. Hash: ${tx.hash}`);
-        const receipt = await tx.wait();
-        
-        if (receipt.status === 1) {
-            console.log("🎉 IBC Transfer Berhasil dikonfirmasi di EVM!");
-            console.log(`🔗 Cek status transfer di explorer. Tx Hash: ${receipt.hash}`);
-        } else {
-            console.error("❌ Transaksi gagal dikonfirmasi di EVM. Status: 0 (Reverted)");
-            console.log("Ini berarti ABI/Fungsi Minimalis juga salah.");
+                console.log(`⏳ Transaksi terkirim. Hash: ${tx.hash}`);
+                const receipt = await tx.wait();
+                
+                if (receipt.status === 1) {
+                    console.log(`🎉 Transaksi #${i}: BERHASIL! Tx Hash: ${receipt.hash}`);
+                } else {
+                    // Jika dikirim tapi status = 0 (revert)
+                    console.error(`❌ Transaksi #${i}: GAGAL REVERT (Status 0). Gas habis!`);
+                    // Bot tetap melanjutkan ke iterasi berikutnya
+                }
+
+            } catch (error) {
+                // Menangkap eror sebelum transaksi masuk blok (misal: RPC down, gas estimation error)
+                if (error.code === 'CALL_EXCEPTION') {
+                    console.error(`❌ Transaksi #${i}: GAGAL KRITIS (REVERT). Lanjut ke iterasi berikutnya.`);
+                    // Bot mengabaikan eror CALL_EXCEPTION dan melanjutkan
+                } else {
+                    console.error(`❌ Transaksi #${i}: GAGAL (Kode: ${error.code}). Coba lagi.`, error.message);
+                    // Bot tetap melanjutkan ke iterasi berikutnya
+                }
+            }
         }
+        console.log("\n======================================================");
+        console.log("✅ Semua iterasi transaksi selesai.");
+        console.log("======================================================");
+
 
     } catch (error) {
-        console.error('❌ Terjadi Kesalahan Kritis:', error.message);
+        console.error('❌ Terjadi Kesalahan Kritis Saat Inisialisasi Bot:', error.message);
     }
 }
 
-// Jalankan fungsi
-bridgeEVMToCosmos();
+// --- MENU UTAMA ---
+function startBotMenu() {
+    console.log("--- Bot Bridge Kii Chain IBC ---");
+    const amount = readline.questionFloat("Masukkan jumlah token KII per transaksi: ");
+    const times = readline.questionInt("Masukkan berapa kali transaksi diulang: ");
+
+    if (amount <= 0 || times <= 0) {
+        console.error("Jumlah token dan ulangan harus lebih besar dari nol.");
+        return;
+    }
+
+    bridgeEVMToCosmos(amount, times);
+}
+
+startBotMenu();
