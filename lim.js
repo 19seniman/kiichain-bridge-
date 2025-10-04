@@ -1,5 +1,5 @@
 const { SigningStargateClient } = require('@cosmjs/stargate');
-// PERUBAHAN DI SINI: Mengganti DirectSecp256k1Wallet
+// Mengubah impor. Ini adalah cara yang benar untuk mendapatkan fungsi dariMnemonic
 const { Secp256k1HdWallet } = require('@cosmjs/proto-signing'); 
 const fs = require('fs');
 const readline = require('readline-sync');
@@ -7,7 +7,7 @@ require('dotenv').config();
 
 // --- 1. KONFIGURASI GLOBAL ---
 const GLOBAL_CONFIG = {
-    PRIVATE_KEY: process.env.PRIVATE_KEY, // Mnemonic (atau kunci pribadi hex)
+    PRIVATE_KEY: process.env.PRIVATE_KEY, // Mnemonic
     CONFIG_FILE: 'cosmos.json',
 };
 
@@ -17,9 +17,8 @@ function loadCosmosConfig() {
         const data = fs.readFileSync(GLOBAL_CONFIG.CONFIG_FILE, 'utf8');
         const config = JSON.parse(data);
         
-        // Cek semua nilai penting
         if (!config.recipientAddress || !config.sourceRpc || !config.sourceChainId || !config.ibcChannelId) {
-            throw new Error("Satu atau lebih konfigurasi di cosmos.json tidak lengkap atau salah.");
+            throw new Error("Satu atau lebih konfigurasi di cosmos.json tidak lengkap.");
         }
         return config;
     } catch (error) {
@@ -28,28 +27,29 @@ function loadCosmosConfig() {
     }
 }
 
-/**
- * Fungsi utama untuk melakukan transfer IBC
- */
+// --- 3. FUNGSI UTAMA BOT ---
 async function runIbcTransferBot(amountToken, totalIterations) {
     const config = loadCosmosConfig();
     if (!GLOBAL_CONFIG.PRIVATE_KEY) {
-        console.error("🚨 Kunci pribadi (PRIVATE_KEY) tidak ditemukan di .env. Harap periksa!");
+        console.error("🚨 Kunci pribadi (MNEMONIC) tidak ditemukan di .env. Harap periksa!");
         return;
     }
 
-    // PERUBAHAN DI SINI: Menggunakan Secp256k1HdWallet
-    const wallet = await Secp256k1HdWallet.fromMnemonic(GLOBAL_CONFIG.PRIVATE_KEY, { prefix: 'kii' }); 
-    const [firstAccount] = await wallet.getAccounts();
-    const senderAddress = firstAccount.address;
-
+    // PERBAIKAN KRITIS UNTUK TYPERROR: Menggunakan Secp256k1HdWallet
     try {
-        // Koneksi ke Source Chain
-        const client = await SigningStargateClient.connectWithSigner(config.sourceRpc, wallet);
-        
+        const wallet = await Secp256k1HdWallet.fromMnemonic(
+            GLOBAL_CONFIG.PRIVATE_KEY, 
+            { prefix: 'kii' } // Ganti 'kii' jika prefix chain Anda berbeda
+        ); 
+        const [firstAccount] = await wallet.getAccounts();
+        const senderAddress = firstAccount.address;
+
         // Asumsi 6 desimal (umum di Cosmos, GANTI jika KII menggunakan 18 desimal)
         const amountWei = BigInt(Math.floor(amountToken * 10**6)); 
         const amountToTransfer = [{ denom: config.sourceDenom, amount: amountWei.toString() }];
+
+        // Koneksi ke Source Chain
+        const client = await SigningStargateClient.connectWithSigner(config.sourceRpc, wallet);
         
         console.log(`\n======================================================`);
         console.log(`✅ BOT IBC DIMULAI: ${totalIterations}x Transfer @ ${amountToken} ${config.sourceDenom}`);
@@ -58,10 +58,9 @@ async function runIbcTransferBot(amountToken, totalIterations) {
         console.log(`======================================================`);
 
         for (let i = 1; i <= totalIterations; i++) {
-            const timeoutInSeconds = 60 * 10; // 10 menit
+            const timeoutInSeconds = 60 * 10;
             const timeoutTimestamp = Math.floor(Date.now() / 1000) + timeoutInSeconds;
             
-            // Biaya Transaksi
             const fee = {
                 amount: [{ denom: config.feeDenom, amount: '5000' }], 
                 gas: '250000',
@@ -70,14 +69,13 @@ async function runIbcTransferBot(amountToken, totalIterations) {
             console.log(`\n---> Mulai Transaksi IBC #${i} dari ${totalIterations}...`);
 
             try {
-                // Melakukan transfer IBC native (IBC ICS-20)
                 const tx = await client.sendIbcTokens(
                     senderAddress,
                     config.recipientAddress,
                     amountToTransfer,
                     config.sourceDenom,
                     config.ibcChannelId,
-                    timeoutTimestamp, // Timestamp dalam detik
+                    timeoutTimestamp,
                     fee,
                     `Auto IBC Transfer #${i}`
                 );
@@ -99,7 +97,7 @@ async function runIbcTransferBot(amountToken, totalIterations) {
         console.log("======================================================");
 
     } catch (error) {
-        console.error('❌ Terjadi Kesalahan Kritis Saat Koneksi/Inisialisasi:', error.message);
+        console.error('❌ Terjadi Kesalahan Kritis Saat Inisialisasi/Koneksi:', error.message);
     }
 }
 
