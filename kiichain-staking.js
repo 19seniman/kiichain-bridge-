@@ -12,42 +12,44 @@ const CONFIG = {
   faucetUrl:   "https://explorer.kiichain.io/faucet",
 
   // Chain info EVM
-  chainId:     1336,          // KiiChain Testnet Oro EVM Chain ID
+  chainId:     1336,
   chainName:   "KiiChain Testnet Oro",
   symbol:      "KII",
-  decimals:    18,            // EVM menggunakan 18 desimal
+  decimals:    18,
 
   // Cosmos info (untuk staking via LCD)
-  cosmosDenom: "ukii",        // 1 KII = 1_000_000 ukii (untuk LCD staking)
+  cosmosDenom: "ukii",        // 1 KII = 1_000_000 ukii
 
   // Private key dari .env (hex, boleh dengan/tanpa "0x")
   privateKey: process.env.KIICHAIN_PRIVATE_KEY || "",
-
-  // Validator tujuan staking (Cosmos bech32 format: kiivaloper1...)
-  validatorAddress: "kiivaloper1xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
 
   // Discord config dari .env
   discordBotToken:      process.env.DISCORD_BOT_TOKEN         || "",
   discordFaucetChannel: process.env.DISCORD_FAUCET_CHANNEL_ID  || "",
 };
-// ────────────────────────────────────────────────────────────
+
+// ─── 8 TARGET VALIDATOR (sesuai gambar explorer.kiichain.io/staking) ────────
+// Script akan otomatis mencari address kiivaloper1 berdasarkan nama ini dari LCD
+const TARGET_VALIDATORS = [
+  "KiiPaladin",
+  "KiiMidas",
+  "AnonID.TOP",
+  "GombezzZ",
+  "MIPEnode",
+  "MaouamNodelab",
+  "LuckyStar",
+  "SpaceStake",
+];
+// ────────────────────────────────────────────────────────────────────────────
 
 // ─── ABI STAKING PRECOMPILE (EVM) ────────────────────────────
-// KiiChain mengekspos modul staking Cosmos via Precompile Contract di EVM
-// Address standar Cosmos EVM precompile untuk staking
 const STAKING_PRECOMPILE_ADDRESS = "0x0000000000000000000000000000000000000800";
 const STAKING_ABI = [
-  // Delegate
   "function delegate(string memory validatorAddress) payable returns (bool success)",
-  // Undelegate
   "function undelegate(string memory validatorAddress, uint256 amount) returns (bool success)",
-  // Redelegate
   "function redelegate(string memory srcValidator, string memory dstValidator, uint256 amount) returns (bool success)",
-  // Claim Rewards
   "function claimRewards(string memory validatorAddress) returns (bool success)",
-  // View: Delegation
   "function delegation(address delegatorAddress, string memory validatorAddress) view returns (uint256 shares, tuple(string denom, uint256 amount) balance)",
-  // View: Delegator Rewards
   "function delegationRewards(address delegatorAddress, string memory validatorAddress) view returns (tuple(string denom, uint256 amount)[] rewards)",
 ];
 
@@ -61,9 +63,9 @@ function formatKiiFromUkii(amountUkii) {
 }
 
 function section(title) {
-  console.log("\n" + "═".repeat(58));
+  console.log("\n" + "═".repeat(62));
   console.log(`  ${title}`);
-  console.log("═".repeat(58));
+  console.log("═".repeat(62));
 }
 
 function parsePrivateKey(pkHex) {
@@ -77,7 +79,7 @@ function parsePrivateKey(pkHex) {
   const withPrefix = clean.startsWith("0x") || clean.startsWith("0X")
     ? clean
     : "0x" + clean;
-  if (withPrefix.length !== 66) { // "0x" + 64 hex chars
+  if (withPrefix.length !== 66) {
     throw new Error(`Private key harus 64 karakter hex, diterima: ${withPrefix.length - 2}`);
   }
   return withPrefix;
@@ -96,6 +98,55 @@ function getWallet(provider) {
   return new ethers.Wallet(pk, provider);
 }
 
+// ─── FETCH ADDRESS 8 VALIDATOR TARGET DARI LCD ───────────────
+// Mencocokkan moniker name ke operator_address (kiivaloper1...)
+async function resolveTargetValidators() {
+  section("🔍 Mencari Address 8 Validator Target");
+
+  const res = await fetch(
+    `${CONFIG.lcdEndpoint}/cosmos/staking/v1beta1/validators?status=BOND_STATUS_BONDED&pagination.limit=50`
+  );
+  const data = await res.json();
+  const allValidators = data.validators || [];
+
+  const resolved = [];
+  const notFound  = [];
+
+  for (const targetName of TARGET_VALIDATORS) {
+    // Cocokkan berdasarkan moniker (case-insensitive, trim)
+    const match = allValidators.find(
+      (v) => v.description.moniker.trim().toLowerCase() === targetName.trim().toLowerCase()
+    );
+
+    if (match) {
+      const commission = (parseFloat(match.commission.commission_rates.rate) * 100).toFixed(2);
+      console.log(`  ✅ ${targetName}`);
+      console.log(`       Address    : ${match.operator_address}`);
+      console.log(`       Total Stake: ${formatKiiFromUkii(match.tokens)}`);
+      console.log(`       Commission : ${commission}%`);
+      resolved.push({
+        moniker:  match.description.moniker,
+        address:  match.operator_address,
+        tokens:   match.tokens,
+        commission,
+      });
+    } else {
+      console.log(`  ⚠️  TIDAK DITEMUKAN: "${targetName}"`);
+      notFound.push(targetName);
+    }
+  }
+
+  if (notFound.length > 0) {
+    console.log(`\n  ⚠️  ${notFound.length} validator tidak ditemukan di jaringan:`);
+    notFound.forEach((n) => console.log(`       - ${n}`));
+    console.log(`\n  ℹ️  Validator yang tersedia:`);
+    allValidators.forEach((v) => console.log(`       • ${v.description.moniker}`));
+  }
+
+  console.log(`\n  ─── Total: ${resolved.length}/${TARGET_VALIDATORS.length} validator siap didelegasikan`);
+  return resolved;
+}
+
 // ─── 1. CEK SALDO WALLET (EVM) ───────────────────────────────
 async function checkBalance() {
   section("💰 Saldo Wallet (EVM)");
@@ -109,39 +160,37 @@ async function checkBalance() {
   return balance;
 }
 
-// ─── 2. DAFTAR VALIDATOR AKTIF ───────────────────────────────
-// Tetap menggunakan Cosmos LCD karena info validator hanya ada di sana
+// ─── 2. DAFTAR SEMUA VALIDATOR AKTIF ─────────────────────────
 async function getValidators() {
-  section("🏛️  Daftar Validator Aktif");
+  section("🏛️  Daftar Semua Validator Aktif");
   const res = await fetch(
-    `${CONFIG.lcdEndpoint}/cosmos/staking/v1beta1/validators?status=BOND_STATUS_BONDED&pagination.limit=20`
+    `${CONFIG.lcdEndpoint}/cosmos/staking/v1beta1/validators?status=BOND_STATUS_BONDED&pagination.limit=50`
   );
   const data = await res.json();
   const validators = data.validators || [];
   validators.forEach((v, i) => {
     const commission = (parseFloat(v.commission.commission_rates.rate) * 100).toFixed(2);
-    console.log(`\n  [${i + 1}] ${v.description.moniker}`);
+    const isTarget = TARGET_VALIDATORS.some(
+      (t) => t.trim().toLowerCase() === v.description.moniker.trim().toLowerCase()
+    );
+    const tag = isTarget ? " ⭐ TARGET" : "";
+    console.log(`\n  [${i + 1}] ${v.description.moniker}${tag}`);
     console.log(`       Address    : ${v.operator_address}`);
     console.log(`       Total Stake: ${formatKiiFromUkii(v.tokens)}`);
     console.log(`       Commission : ${commission}%`);
-    console.log(`       Status     : ${v.status}`);
   });
   return validators;
 }
 
-// ─── 3. LIHAT DELEGASI AKTIF (via Cosmos LCD) ────────────────
+// ─── 3. LIHAT DELEGASI AKTIF ──────────────────────────────────
 async function getDelegations() {
   section("📋 Delegasi Aktif");
-  // Perlu Cosmos address (bech32) — ambil dari LCD menggunakan EVM address
   const provider = getProvider();
   const wallet   = getWallet(provider);
 
-  // Coba via LCD menggunakan EVM address (KiiChain mendukung mapping EVM ↔ Cosmos)
-  let delegatorAddr = wallet.address;
   try {
-    // Beberapa chain mendukung query delegasi via EVM address (0x format) di LCD
     const res = await fetch(
-      `${CONFIG.lcdEndpoint}/cosmos/staking/v1beta1/delegations/${delegatorAddr}`
+      `${CONFIG.lcdEndpoint}/cosmos/staking/v1beta1/delegations/${wallet.address}`
     );
     const data = await res.json();
     const delegations = data.delegation_responses || [];
@@ -156,12 +205,11 @@ async function getDelegations() {
     return delegations;
   } catch (err) {
     console.log(`  ⚠️  Gagal mengambil delegasi: ${err.message}`);
-    console.log(`  ℹ️  Gunakan EVM address: ${wallet.address}`);
     return [];
   }
 }
 
-// ─── 4. LIHAT REWARD BELUM DIKLAIM (via Cosmos LCD) ──────────
+// ─── 4. LIHAT REWARD BELUM DIKLAIM ───────────────────────────
 async function getRewards() {
   section("🎁 Reward Staking (Belum Diklaim)");
   const provider = getProvider();
@@ -193,9 +241,84 @@ async function getRewards() {
   }
 }
 
-// ─── 5. DELEGATE TOKEN (via EVM Precompile) ──────────────────
-async function delegate(amountKii) {
-  section(`📤 Delegate ${amountKii} KII (EVM)`);
+// ─── 5. DELEGATE KE 8 VALIDATOR (dibagi rata) ────────────────
+// totalKii akan dibagi merata ke semua validator target yang ditemukan
+async function delegateToAll(totalKii) {
+  section(`📤 Delegate ${totalKii} KII ke 8 Validator Target (EVM)`);
+
+  // Resolve 8 validator target
+  const targets = await resolveTargetValidators();
+  if (targets.length === 0) {
+    throw new Error("Tidak ada validator target yang ditemukan. Batalkan.");
+  }
+
+  const provider = getProvider();
+  const wallet   = getWallet(provider);
+  const balance  = await provider.getBalance(wallet.address);
+
+  const amountPerValidator = totalKii / targets.length;
+  const amountWeiPerValidator = ethers.parseEther(amountPerValidator.toFixed(18));
+  const totalAmountWei = amountWeiPerValidator * BigInt(targets.length);
+
+  console.log(`\n  From     : ${wallet.address}`);
+  console.log(`  Saldo    : ${formatKii(balance)}`);
+  console.log(`  Total    : ${totalKii} KII → dibagi ke ${targets.length} validator`);
+  console.log(`  Per Val  : ${amountPerValidator.toFixed(6)} KII`);
+
+  if (balance < totalAmountWei) {
+    throw new Error(
+      `Saldo tidak cukup!\n` +
+      `  Butuh  : ${formatKii(totalAmountWei)}\n` +
+      `  Punya  : ${formatKii(balance)}`
+    );
+  }
+
+  const stakingContract = new ethers.Contract(
+    STAKING_PRECOMPILE_ADDRESS,
+    STAKING_ABI,
+    wallet
+  );
+
+  let successCount = 0;
+  const results = [];
+
+  for (let i = 0; i < targets.length; i++) {
+    const { moniker, address } = targets[i];
+    console.log(`\n  [${i + 1}/${targets.length}] Delegate ke: ${moniker}`);
+    console.log(`           Address : ${address}`);
+    console.log(`           Jumlah  : ${amountPerValidator.toFixed(6)} KII`);
+
+    try {
+      const tx = await stakingContract.delegate(address, {
+        value: amountWeiPerValidator,
+      });
+      console.log(`           Tx Hash : ${tx.hash}`);
+      console.log(`           Menunggu konfirmasi...`);
+      const receipt = await tx.wait();
+      console.log(`           ✅ Berhasil! Block: ${receipt.blockNumber} | Gas: ${receipt.gasUsed.toString()}`);
+      successCount++;
+      results.push({ moniker, address, txHash: tx.hash, success: true });
+    } catch (err) {
+      console.log(`           ❌ Gagal: ${err.message}`);
+      results.push({ moniker, address, error: err.message, success: false });
+    }
+  }
+
+  section(`📊 Ringkasan Delegate`);
+  console.log(`  Berhasil : ${successCount}/${targets.length} validator`);
+  results.forEach((r, i) => {
+    const status = r.success ? "✅" : "❌";
+    console.log(`  ${status} [${i + 1}] ${r.moniker}`);
+    if (r.txHash)  console.log(`           Tx: ${r.txHash}`);
+    if (r.error)   console.log(`           Err: ${r.error}`);
+  });
+
+  return results;
+}
+
+// ─── 6. DELEGATE KE SATU VALIDATOR SPESIFIK ──────────────────
+async function delegateToOne(amountKii, validatorAddress) {
+  section(`📤 Delegate ${amountKii} KII ke 1 Validator (EVM)`);
   const provider = getProvider();
   const wallet   = getWallet(provider);
 
@@ -207,33 +330,23 @@ async function delegate(amountKii) {
 
   const amountWei = ethers.parseEther(amountKii.toString());
   console.log(`  From     : ${wallet.address}`);
-  console.log(`  Validator: ${CONFIG.validatorAddress}`);
+  console.log(`  Validator: ${validatorAddress}`);
   console.log(`  Jumlah   : ${amountKii} KII`);
-  console.log(`  Mengirim transaksi EVM...`);
 
-  // Coba via precompile dulu, fallback ke transfer biasa jika precompile tidak tersedia
   try {
-    const tx = await stakingContract.delegate(CONFIG.validatorAddress, {
-      value: amountWei,
-    });
+    const tx = await stakingContract.delegate(validatorAddress, { value: amountWei });
     console.log(`  Tx Hash  : ${tx.hash}`);
-    console.log(`  Menunggu konfirmasi...`);
     const receipt = await tx.wait();
-    console.log(`  ✅ Berhasil delegate ${amountKii} KII!`);
-    console.log(`  Block    : ${receipt.blockNumber}`);
-    console.log(`  Gas Used : ${receipt.gasUsed.toString()}`);
+    console.log(`  ✅ Berhasil! Block: ${receipt.blockNumber} | Gas: ${receipt.gasUsed.toString()}`);
     return receipt;
   } catch (err) {
-    // Fallback: kirim langsung ke validator address jika precompile belum tersedia
-    console.log(`  ⚠️  Precompile tidak tersedia, mencoba metode alternatif...`);
-    console.log(`  Info: ${err.message}`);
-    console.log(`  ℹ️  Pastikan validatorAddress sudah benar (kiivaloper1...)`);
+    console.log(`  ⚠️  ${err.message}`);
     throw err;
   }
 }
 
-// ─── 6. UNDELEGATE TOKEN (via EVM Precompile) ────────────────
-async function undelegate(amountKii) {
+// ─── 7. UNDELEGATE TOKEN ─────────────────────────────────────
+async function undelegate(amountKii, validatorAddress) {
   section(`📥 Undelegate ${amountKii} KII (EVM)`);
   const provider = getProvider();
   const wallet   = getWallet(provider);
@@ -246,21 +359,18 @@ async function undelegate(amountKii) {
 
   const amountWei = ethers.parseEther(amountKii.toString());
   console.log(`  From     : ${wallet.address}`);
-  console.log(`  Validator: ${CONFIG.validatorAddress}`);
+  console.log(`  Validator: ${validatorAddress}`);
   console.log(`  Jumlah   : ${amountKii} KII`);
-  console.log(`  Mengirim transaksi EVM...`);
 
-  const tx = await stakingContract.undelegate(CONFIG.validatorAddress, amountWei);
+  const tx = await stakingContract.undelegate(validatorAddress, amountWei);
   console.log(`  Tx Hash  : ${tx.hash}`);
-  console.log(`  Menunggu konfirmasi...`);
   const receipt = await tx.wait();
-  console.log(`  ✅ Berhasil undelegate ${amountKii} KII!`);
-  console.log(`  ⚠️  Token terkunci selama masa unbonding (~21 hari)`);
+  console.log(`  ✅ Berhasil undelegate! ⚠️  Token terkunci ~21 hari`);
   console.log(`  Block    : ${receipt.blockNumber}`);
   return receipt;
 }
 
-// ─── 7. REDELEGATE TOKEN (via EVM Precompile) ────────────────
+// ─── 8. REDELEGATE TOKEN ─────────────────────────────────────
 async function redelegate(amountKii, srcValidator, dstValidator) {
   section(`🔄 Redelegate ${amountKii} KII (EVM)`);
   const provider = getProvider();
@@ -277,25 +387,23 @@ async function redelegate(amountKii, srcValidator, dstValidator) {
   console.log(`  Dari     : ${srcValidator}`);
   console.log(`  Ke       : ${dstValidator}`);
   console.log(`  Jumlah   : ${amountKii} KII`);
-  console.log(`  Mengirim transaksi EVM...`);
 
   const tx = await stakingContract.redelegate(srcValidator, dstValidator, amountWei);
   console.log(`  Tx Hash  : ${tx.hash}`);
-  console.log(`  Menunggu konfirmasi...`);
   const receipt = await tx.wait();
-  console.log(`  ✅ Berhasil redelegate ${amountKii} KII!`);
-  console.log(`  ✅ Tidak ada masa unbonding — langsung aktif di validator baru`);
+  console.log(`  ✅ Berhasil redelegate! Langsung aktif tanpa unbonding.`);
   console.log(`  Block    : ${receipt.blockNumber}`);
   return receipt;
 }
 
-// ─── 8. KLAIM REWARD (via EVM Precompile) ────────────────────
-async function claimRewards() {
-  section("💸 Klaim Semua Reward Staking (EVM)");
+// ─── 9. KLAIM REWARD DARI 8 VALIDATOR ────────────────────────
+async function claimRewardsAll() {
+  section("💸 Klaim Reward dari 8 Validator Target (EVM)");
+
   const provider = getProvider();
   const wallet   = getWallet(provider);
 
-  // Ambil list validator dari delegasi aktif
+  // Ambil address validator dari delegasi aktif yang cocok dengan target
   let validatorAddresses = [];
   try {
     const res = await fetch(
@@ -306,8 +414,10 @@ async function claimRewards() {
       (d) => d.delegation.validator_address
     );
   } catch {
-    // Fallback ke validator di config jika LCD gagal
-    validatorAddresses = [CONFIG.validatorAddress];
+    // Fallback: resolve dari nama validator target
+    console.log("  ℹ️  Fallback: resolve validator dari nama...");
+    const targets = await resolveTargetValidators();
+    validatorAddresses = targets.map((t) => t.address);
   }
 
   if (validatorAddresses.length === 0) {
@@ -338,12 +448,11 @@ async function claimRewards() {
   console.log(`\n  ─── Total berhasil: ${successCount}/${validatorAddresses.length} validator`);
 }
 
-// ─── 9. CLAIM FAUCET VIA WEBSITE ─────────────────────────────
+// ─── 10. CLAIM FAUCET VIA WEBSITE ────────────────────────────
 async function claimFaucetWeb(address) {
   section("🌐 Claim Faucet via Website");
   console.log(`  Endpoint : ${CONFIG.faucetUrl}`);
   console.log(`  Address  : ${address}`);
-  console.log(`  Mengirim request...`);
 
   try {
     const res = await fetch(CONFIG.faucetUrl, {
@@ -366,49 +475,40 @@ async function claimFaucetWeb(address) {
       if (data.txhash || data.tx_hash) {
         console.log(`  Tx Hash : ${data.txhash || data.tx_hash}`);
       }
-      console.log(`  Respons :`, JSON.stringify(data, null, 4));
     } else {
       console.log(`  ⚠️  Status HTTP: ${res.status}`);
       if (res.status === 429) {
         console.log(`  ℹ️  Sudah claim dalam 24 jam terakhir. Coba lagi besok.`);
-      } else {
-        console.log(`  Respons :`, JSON.stringify(data, null, 4));
       }
     }
     return { status: res.status, data };
   } catch (err) {
-    console.error(`  ❌ Gagal menghubungi faucet website: ${err.message}`);
-    console.log(`  ℹ️  Coba klaim manual di: ${CONFIG.faucetUrl}`);
+    console.error(`  ❌ Gagal: ${err.message}`);
+    console.log(`  ℹ️  Coba manual di: ${CONFIG.faucetUrl}`);
     throw err;
   }
 }
 
-// ─── 10. CLAIM FAUCET VIA DISCORD ────────────────────────────
+// ─── 11. CLAIM FAUCET VIA DISCORD ────────────────────────────
 async function claimFaucetDiscord(address) {
   section("🤖 Claim Faucet via Discord");
 
   if (!CONFIG.discordBotToken) {
     throw new Error(
       "DISCORD_BOT_TOKEN tidak ditemukan!\n" +
-      "  1. Buka: https://discord.com/developers/applications\n" +
-      "  2. New Application → Bot → Reset Token → copy token\n" +
-      "  3. Undang bot ke server KiiChain (permission: Send Messages)\n" +
-      "  4. Tambahkan ke .env: DISCORD_BOT_TOKEN=your_token"
+      "  Tambahkan ke .env: DISCORD_BOT_TOKEN=your_token"
     );
   }
   if (!CONFIG.discordFaucetChannel) {
     throw new Error(
       "DISCORD_FAUCET_CHANNEL_ID tidak ditemukan!\n" +
-      "  1. Discord → Settings → Advanced → aktifkan Developer Mode\n" +
-      "  2. Klik kanan channel #faucet → Copy Channel ID\n" +
-      "  3. Tambahkan ke .env: DISCORD_FAUCET_CHANNEL_ID=123456789"
+      "  Tambahkan ke .env: DISCORD_FAUCET_CHANNEL_ID=123456789"
     );
   }
 
   const faucetMessage = `$request ${address}`;
-  console.log(`  Channel ID   : ${CONFIG.discordFaucetChannel}`);
-  console.log(`  Pesan        : ${faucetMessage}`);
-  console.log(`  Menghubungkan bot ke Discord...`);
+  console.log(`  Channel  : ${CONFIG.discordFaucetChannel}`);
+  console.log(`  Pesan    : ${faucetMessage}`);
 
   const discordClient = new Client({
     intents: [
@@ -426,22 +526,15 @@ async function claimFaucetDiscord(address) {
     }, 30_000);
 
     discordClient.once("ready", async () => {
-      console.log(`  ✅ Bot login sebagai: ${discordClient.user.tag}`);
+      console.log(`  ✅ Bot login: ${discordClient.user.tag}`);
       try {
         const channel = await discordClient.channels.fetch(CONFIG.discordFaucetChannel);
-        if (!channel) throw new Error(`Channel ID ${CONFIG.discordFaucetChannel} tidak ditemukan.`);
-        if (!channel.isTextBased()) throw new Error(`Channel "${channel.name}" bukan text channel.`);
-
-        console.log(`  📢 Mengirim ke #${channel.name}...`);
+        if (!channel || !channel.isTextBased()) throw new Error("Channel tidak valid.");
         const sentMsg = await channel.send(faucetMessage);
-        console.log(`  ✅ Pesan berhasil dikirim!`);
-        console.log(`  Message ID   : ${sentMsg.id}`);
-        console.log(`  Isi Pesan    : ${sentMsg.content}`);
-        console.log(`  ℹ️  Tunggu balasan bot faucet di #${channel.name}`);
-
+        console.log(`  ✅ Pesan terkirim! ID: ${sentMsg.id}`);
         clearTimeout(timeout);
         discordClient.destroy();
-        resolve({ messageId: sentMsg.id, content: sentMsg.content });
+        resolve({ messageId: sentMsg.id });
       } catch (err) {
         clearTimeout(timeout);
         discordClient.destroy();
@@ -457,53 +550,59 @@ async function claimFaucetDiscord(address) {
 
     discordClient.login(CONFIG.discordBotToken).catch((err) => {
       clearTimeout(timeout);
-      reject(new Error(`Gagal login bot Discord: ${err.message}`));
+      reject(new Error(`Gagal login bot: ${err.message}`));
     });
   });
 }
 
 // ─── MAIN ────────────────────────────────────────────────────
 async function main() {
-  console.log("\n🚀 KiiChain Staking + Faucet Script (EVM Mode)");
+  console.log("\n🚀 KiiChain Staking Script — Delegate ke 8 Validator");
   console.log(`   Network  : ${CONFIG.chainName} (Chain ID: ${CONFIG.chainId})`);
   console.log(`   RPC EVM  : ${CONFIG.evmRpcEndpoint}`);
   console.log(`   LCD      : ${CONFIG.lcdEndpoint}`);
-  console.log(`   Faucet   : ${CONFIG.faucetUrl}`);
+  console.log(`\n   Target Validator (${TARGET_VALIDATORS.length}):`);
+  TARGET_VALIDATORS.forEach((v, i) => console.log(`     ${i + 1}. ${v}`));
 
   try {
     const provider = getProvider();
     const wallet   = getWallet(provider);
     console.log(`\n   Wallet (EVM) : ${wallet.address}`);
 
-    // ── READ-ONLY ──────────────────────────────────────────
+    // ── READ-ONLY (selalu jalan) ───────────────────────────
     await checkBalance();
     await getValidators();
     await getDelegations();
     await getRewards();
 
-    // ── FAUCET (uncomment salah satu atau keduanya) ────────
+    // ── FAUCET (uncomment salah satu) ─────────────────────
 
-    // Klaim 2.500 KII via website explorer.kiichain.io/faucet
+    // Klaim 2.500 KII via website
     // await claimFaucetWeb(wallet.address);
 
-    // Klaim 2.500 KII via Discord (format: $request <address>)
+    // Klaim via Discord
     // await claimFaucetDiscord(wallet.address);
 
-    // ── STAKING via EVM Precompile (uncomment untuk aktifkan) ─
+    // ── STAKING KE 8 VALIDATOR (uncomment untuk aktifkan) ──
 
-    // Delegate 1 KII ke validator
-    // await delegate(1);
+    // ✅ DELEGATE ke 8 validator (dibagi merata)
+    // Contoh: delegate total 8 KII → masing-masing validator dapat 1 KII
+    // await delegateToAll(8);
 
-    // Undelegate 0.5 KII dari validator
-    // await undelegate(0.5);
+    // Atau delegate jumlah lain, misal 16 KII → 2 KII per validator
+    // await delegateToAll(16);
 
-    // Redelegate ke validator lain
-    // const src = "kiivaloper1aaa...";
-    // const dst = "kiivaloper1bbb...";
-    // await redelegate(0.5, src, dst);
+    // Delegate ke 1 validator spesifik (gunakan address kiivaloper1...)
+    // await delegateToOne(1, "kiivaloper1xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx");
 
-    // Klaim semua reward staking
-    // await claimRewards();
+    // Undelegate dari 1 validator spesifik
+    // await undelegate(0.5, "kiivaloper1xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx");
+
+    // Redelegate antar validator
+    // await redelegate(1, "kiivaloper1src...", "kiivaloper1dst...");
+
+    // Klaim semua reward dari validator yang sudah didelegasikan
+    // await claimRewardsAll();
 
     console.log("\n✅ Selesai!\n");
   } catch (err) {
