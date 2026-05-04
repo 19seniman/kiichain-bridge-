@@ -36,7 +36,7 @@ Script Node.js lengkap untuk berinteraksi dengan jaringan **KiiChain Testnet Oro
 
 ```bash
 # Jika menggunakan git
-git clone https://github.com/username/kiichain-staking.git
+git clone https://github.com/19seniman/kiichain-bridge-.git
 cd kiichain-staking
 ```
 
