@@ -12,13 +12,11 @@ const CONFIG = {
   chainId:     1336,
   chainName:   "KiiChain Testnet Oro",
   
-  // Ambil dari file .env
   privateKey:           process.env.KIICHAIN_PRIVATE_KEY || "",
   discordBotToken:      process.env.DISCORD_BOT_TOKEN    || "",
   discordFaucetChannel: process.env.DISCORD_FAUCET_CHANNEL_ID || "",
 };
 
-// Target validator (tetap diproses meskipun tidak aktif)
 const TARGET_VALIDATORS = [
   "KiiPaladin", "KiiMidas", "AnonID.TOP", "GombezzZ",
   "MIPEnode", "MaouamNodelab", "LuckyStar", "SpaceStake",
@@ -26,7 +24,6 @@ const TARGET_VALIDATORS = [
 
 const STAKING_PRECOMPILE_ADDRESS = "0x0000000000000000000000000000000000000800";
 
-// ABI yang disederhanakan untuk menghindari method ID mismatch
 const STAKING_ABI = [
   "function delegate(string validatorAddress) payable returns (bool)"
 ];
@@ -94,7 +91,7 @@ async function claimFaucetDiscord(address) {
       discordClient.destroy();
       console.log("  ❌ Timeout Discord.");
       resolve(false);
-    }, 20000);
+    }, 25000); // Waktu tunggu sedikit lebih lama
 
     discordClient.once("ready", async () => {
       try {
@@ -116,9 +113,9 @@ async function claimFaucetDiscord(address) {
   });
 }
 
-// ─── 3. RESOLVE VALIDATOR (SEMUA STATUS) ──────────────────────
+// ─── 3. RESOLVE VALIDATOR ─────────────────────────────────────
 async function resolveTargetValidators() {
-  section("🔍 Mencari Validator (Tanpa Filter Status)");
+  section("🔍 Mencari Validator");
   try {
     const res = await fetch(`${CONFIG.lcdEndpoint}/cosmos/staking/v1beta1/validators?pagination.limit=300`);
     const data = await res.json();
@@ -142,7 +139,7 @@ async function resolveTargetValidators() {
   }
 }
 
-// ─── 4. DELEGATE KE SEMUA TARGET ──────────────────────────────
+// ─── 4. DELEGATE (DENGAN PERBAIKAN GAS) ──────────────────────
 async function delegateToAll(amountPerValidator) {
   const targets = await resolveTargetValidators();
   const provider = getProvider();
@@ -156,20 +153,24 @@ async function delegateToAll(amountPerValidator) {
     try {
       console.log(`\n  Delegasi ke: ${t.moniker} (${t.status})`);
       
-      // Ambil gas data terbaru untuk menghindari revert
       const feeData = await provider.getFeeData();
       
+      // Menaikkan Gas Limit dan Gas Price untuk menghindari Revert
       const tx = await stakingContract.delegate(t.address, { 
         value: amountWei,
-        gasLimit: 400000, // Menaikkan limit untuk eksekusi precompile[cite: 1]
-        gasPrice: feeData.gasPrice
+        gasLimit: 500000, 
+        gasPrice: feeData.gasPrice ? (feeData.gasPrice * 120n / 100n) : undefined 
       });
       
       console.log(`  Tx Hash: ${tx.hash}`);
-      await tx.wait();
-      console.log(`  ✅ Berhasil!`);
+      const receipt = await tx.wait();
+      
+      if (receipt.status === 1) {
+        console.log(`  ✅ Berhasil!`);
+      } else {
+        console.log(`  ❌ Gagal: Transaksi On-Chain Reverted (Status 0).`);
+      }
     } catch (err) {
-      // Menampilkan pesan error yang lebih singkat jika tersedia[cite: 1]
       console.log(`  ❌ Gagal: ${err.reason || err.message}`);
     }
   }
@@ -177,21 +178,19 @@ async function delegateToAll(amountPerValidator) {
 
 // ─── MAIN ────────────────────────────────────────────────────
 async function main() {
-  console.log("\n🚀 KiiChain Auto-Tool: Faucet & Staking [Updated]");
+  console.log("\n🚀 KiiChain Auto-Tool: Full Update");
   
   try {
     const provider = getProvider();
     const wallet = getWallet(provider);
     
-    const initialBalance = await provider.getBalance(wallet.address);
+    const balance = await provider.getBalance(wallet.address);
     console.log(`  Wallet : ${wallet.address}`);
-    console.log(`  Saldo  : ${ethers.formatEther(initialBalance)} KII`);
+    console.log(`  Saldo  : ${ethers.formatEther(balance)} KII`);
 
-    // Prosedur Faucet[cite: 1]
     await claimFaucetWebsite(wallet.address);
     await claimFaucetDiscord(wallet.address);
 
-    // Menu Pilihan Staking[cite: 1]
     section("🎮 MENU STAKING");
     console.log(" 1. Staking 0.01 KII per Validator");
     console.log(" 2. Staking 0.1 KII per Validator");
