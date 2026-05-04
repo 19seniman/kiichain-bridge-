@@ -1,17 +1,17 @@
 require("dotenv").config();
 const { ethers } = require("ethers");
 const { Client, GatewayIntentBits } = require("discord.js");
+const readline = require("readline");
 
 // ─── KONFIGURASI ────────────────────────────────────────────
 const CONFIG = {
   evmRpcEndpoint: "https://json-rpc.uno.sentry.testnet.v3.kiivalidator.com",
   lcdEndpoint: "https://lcd.uno.sentry.testnet.v3.kiivalidator.com",
-  faucetUrl:   "https://explorer.kiichain.io/faucet", // URL Website Faucet
+  faucetUrl:   "https://explorer.kiichain.io/faucet",
 
   chainId:     1336,
   chainName:   "KiiChain Testnet Oro",
   
-  // Data dari .env
   privateKey:           process.env.KIICHAIN_PRIVATE_KEY || "",
   discordBotToken:      process.env.DISCORD_BOT_TOKEN    || "",
   discordFaucetChannel: process.env.DISCORD_FAUCET_CHANNEL_ID || "",
@@ -41,39 +41,36 @@ function getWallet(provider) {
   return new ethers.Wallet(pk.startsWith("0x") ? pk : "0x" + pk, provider);
 }
 
-// ─── 1. OTOMATIS KLAIM FAUCET WEBSITE ────────────────────────
-async function claimFaucetWebsite(address) {
-  section("🌐 Mendaki Faucet Website");
-  console.log(`  Target  : ${CONFIG.faucetUrl}`);
-  console.log(`  Address : ${address}`);
+const rl = readline.createInterface({
+  input: process.stdin,
+  output: process.stdout
+});
 
+function askQuestion(query) {
+  return new Promise(resolve => rl.question(query, resolve));
+}
+
+// ─── 1. KLAIM FAUCET WEBSITE ─────────────────────────────────
+async function claimFaucetWebsite(address) {
+  section("🌐 Mengirim Request Faucet Website");
   try {
     const response = await fetch(CONFIG.faucetUrl, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        "Accept": "application/json",
         "Origin": "https://explorer.kiichain.io",
         "Referer": "https://explorer.kiichain.io/faucet",
       },
       body: JSON.stringify({ address: address }),
     });
-
     const result = await response.text();
-    
-    if (response.ok) {
-      console.log(`  ✅ Berhasil! Respon: ${result}`);
-    } else if (response.status === 429) {
-      console.log(`  ⏳ Terlalu banyak permintaan (Rate Limit). Coba lagi nanti.`);
-    } else {
-      console.log(`  ⚠️ Status: ${response.status} - ${result}`);
-    }
+    console.log(response.ok ? `  ✅ Berhasil!` : `  ⚠️ Status: ${response.status}`);
   } catch (err) {
-    console.log(`  ❌ Gagal klaim website: ${err.message}`);
+    console.log(`  ❌ Gagal: ${err.message}`);
   }
 }
 
-// ─── 2. CLAIM FAUCET VIA DISCORD ────────────────────────────────
+// ─── 2. CLAIM FAUCET DISCORD ─────────────────────────────────
 async function claimFaucetDiscord(address) {
   section("🤖 Claim Faucet via Discord");
   if (!CONFIG.discordBotToken) return console.log("  Skip: Token Discord tidak ada.");
@@ -84,7 +81,7 @@ async function claimFaucetDiscord(address) {
   return new Promise((resolve) => {
     const timeout = setTimeout(() => {
       discordClient.destroy();
-      console.log("  ❌ Timeout: Bot Discord tidak merespon.");
+      console.log("  ❌ Timeout Discord.");
       resolve(false);
     }, 20000);
 
@@ -93,13 +90,12 @@ async function claimFaucetDiscord(address) {
         const channel = await discordClient.channels.fetch(CONFIG.discordFaucetChannel);
         if (channel?.isTextBased()) {
           await channel.send(faucetMessage);
-          console.log(`  ✅ Pesan "$request" terkirim.`);
+          console.log(`  ✅ Pesan terkirim.`);
         }
         clearTimeout(timeout);
         discordClient.destroy();
         resolve(true);
       } catch (err) {
-        console.log(`  ❌ Error Discord: ${err.message}`);
         discordClient.destroy();
         resolve(false);
       }
@@ -111,23 +107,40 @@ async function claimFaucetDiscord(address) {
 // ─── 3. RESOLVE VALIDATOR (SEMUA STATUS) ──────────────────────
 async function resolveTargetValidators() {
   section("🔍 Mencari Validator (Tanpa Filter Status)");
-  try {
-    const res = await fetch(`${CONFIG.lcdEndpoint}/cosmos/staking/v1beta1/validators?pagination.limit=300`);
-    const data = await res.json();
-    const allValidators = data.validators || [];
-
-    const resolved = [];
-    for (const name of TARGET_VALIDATORS) {
-      const match = allValidators.find(v => v.description.moniker.trim().toLowerCase() === name.toLowerCase());
-      if (match) {
-        console.log(`  ✅ ${name} [${match.status.replace("BOND_STATUS_", "")}] -> ${match.operator_address}`);
-        resolved.push({ moniker: name, address: match.operator_address });
-      }
+  const res = await fetch(`${CONFIG.lcdEndpoint}/cosmos/staking/v1beta1/validators?pagination.limit=300`);
+  const data = await res.json();
+  const allValidators = data.validators || [];
+  const resolved = [];
+  
+  for (const name of TARGET_VALIDATORS) {
+    const match = allValidators.find(v => v.description.moniker.trim().toLowerCase() === name.toLowerCase());
+    if (match) {
+      resolved.push({ moniker: name, address: match.operator_address, status: match.status.replace("BOND_STATUS_", "") });
     }
-    return resolved;
-  } catch (err) {
-    console.log("  ❌ Gagal mengambil data validator.");
-    return [];
+  }
+  return resolved;
+}
+
+// ─── 4. DELEGATE KE SEMUA TARGET ──────────────────────────────
+async function delegateToAll(amountPerValidator) {
+  const targets = await resolveTargetValidators();
+  const provider = getProvider();
+  const wallet = getWallet(provider);
+  const stakingContract = new ethers.Contract(STAKING_PRECOMPILE_ADDRESS, STAKING_ABI, wallet);
+  
+  const amountWei = ethers.parseEther(amountPerValidator.toString());
+  section(`📤 Staking ${amountPerValidator} KII ke ${targets.length} Validator`);
+
+  for (const t of targets) {
+    try {
+      console.log(`\n  Delegasi ke: ${t.moniker} (${t.status})`);
+      const tx = await stakingContract.delegate(t.address, { value: amountWei });
+      console.log(`  Tx: ${tx.hash}`);
+      await tx.wait();
+      console.log(`  ✅ Berhasil!`);
+    } catch (err) {
+      console.log(`  ❌ Gagal: ${err.message}`);
+    }
   }
 }
 
@@ -138,22 +151,33 @@ async function main() {
   try {
     const provider = getProvider();
     const wallet = getWallet(provider);
+    console.log(`  Wallet : ${wallet.address}`);
 
-    // Langkah 1: Klaim Faucet Website
+    // Prosedur Faucet
     await claimFaucetWebsite(wallet.address);
-
-    // Langkah 2: Klaim Faucet Discord[cite: 1]
     await claimFaucetDiscord(wallet.address);
 
-    // Langkah 3: Contoh Delegasi (Uncomment untuk mengaktifkan)
-    // const targets = await resolveTargetValidators();
-    // if (targets.length > 0) {
-    //   console.log("\n  Siap melakukan delegasi...");
-    // }
+    // Menu Pilihan Staking
+    section("🎮 MENU STAKING");
+    console.log(" 1. Staking 0.01 KII per Validator");
+    console.log(" 2. Staking 0.1 KII per Validator");
+    console.log(" 3. Lewati Staking");
+
+    const choice = await askQuestion("\n Pilih menu (1/2/3): ");
+
+    if (choice === "1") {
+      await delegateToAll(0.01);[cite: 1]
+    } else if (choice === "2") {
+      await delegateToAll(0.1);[cite: 1]
+    } else {
+      console.log("\n  Proses staking dilewati.");[cite: 1]
+    }
 
     console.log("\n✅ Selesai!\n");
   } catch (err) {
-    console.error("\n❌ Error Utama:", err.message);
+    console.error("\n❌ Error:", err.message);
+  } finally {
+    rl.close();
   }
 }
 
