@@ -92,41 +92,6 @@ node_modules/
 
 > ⚠️ **PENTING:** Jangan pernah commit file `.env` ke Git/GitHub karena berisi private key!
 
----
-
-## ⚙️ Konfigurasi
-
-Buka file `kiichain-staking.js` dan sesuaikan bagian `CONFIG`:
-
-```js
-const CONFIG = {
-  rpcEndpoint: "https://rpc.uno.sentry.testnet.v3.kiivalidator.com",
-  lcdEndpoint: "https://lcd.uno.sentry.testnet.v3.kiivalidator.com",
-  faucetUrl:   "https://explorer.kiichain.io/faucet",
-
-  chainId: "kiichain3",
-  denom:   "ukii",   // 1 KII = 1.000.000 ukii
-  prefix:  "kii",
-
-  // Dari file .env — JANGAN isi langsung di sini
-  privateKey: process.env.KIICHAIN_PRIVATE_KEY || "",
-
-  // Ganti dengan address validator tujuan staking
-  validatorAddress: "kiivaloper1xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
-
-  discordBotToken:      process.env.DISCORD_BOT_TOKEN        || "",
-  discordFaucetChannel: process.env.DISCORD_FAUCET_CHANNEL_ID || "",
-};
-```
-
-### Cara mendapatkan address validator
-
-1. Buka https://explorer.kiichain.io
-2. Klik menu **Validators**
-3. Pilih validator yang diinginkan
-4. Copy **Operator Address** (diawali dengan `kiivaloper1...`)
-
----
 
 ## 🚀 Cara Menjalankan
 
