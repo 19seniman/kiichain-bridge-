@@ -34,11 +34,14 @@ function section(title) {
   console.log("═".repeat(62));
 }
 
-function getProvider() { return new ethers.JsonRpcProvider(CONFIG.evmRpcEndpoint); }
+function getProvider() { 
+    return new ethers.JsonRpcProvider(CONFIG.evmRpcEndpoint); 
+}
 
 function getWallet(provider) {
   const pk = CONFIG.privateKey.trim();
-  return new ethers.Wallet(pk.startsWith("0x") ? pk : "0x" + pk, provider);
+  const formattedPk = pk.startsWith("0x") ? pk : "0x" + pk;
+  return new ethers.Wallet(formattedPk, provider);
 }
 
 const rl = readline.createInterface({
@@ -76,7 +79,9 @@ async function claimFaucetDiscord(address) {
   if (!CONFIG.discordBotToken) return console.log("  Skip: Token Discord tidak ada.");
 
   const faucetMessage = `$request ${address}`;
-  const discordClient = new Client({ intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages] });
+  const discordClient = new Client({ 
+    intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages] 
+  });
 
   return new Promise((resolve) => {
     const timeout = setTimeout(() => {
@@ -88,7 +93,7 @@ async function claimFaucetDiscord(address) {
     discordClient.once("ready", async () => {
       try {
         const channel = await discordClient.channels.fetch(CONFIG.discordFaucetChannel);
-        if (channel?.isTextBased()) {
+        if (channel && channel.isTextBased()) {
           await channel.send(faucetMessage);
           console.log(`  ✅ Pesan terkirim.`);
         }
@@ -107,18 +112,27 @@ async function claimFaucetDiscord(address) {
 // ─── 3. RESOLVE VALIDATOR (SEMUA STATUS) ──────────────────────
 async function resolveTargetValidators() {
   section("🔍 Mencari Validator (Tanpa Filter Status)");
-  const res = await fetch(`${CONFIG.lcdEndpoint}/cosmos/staking/v1beta1/validators?pagination.limit=300`);
-  const data = await res.json();
-  const allValidators = data.validators || [];
-  const resolved = [];
-  
-  for (const name of TARGET_VALIDATORS) {
-    const match = allValidators.find(v => v.description.moniker.trim().toLowerCase() === name.toLowerCase());
-    if (match) {
-      resolved.push({ moniker: name, address: match.operator_address, status: match.status.replace("BOND_STATUS_", "") });
+  try {
+    const res = await fetch(`${CONFIG.lcdEndpoint}/cosmos/staking/v1beta1/validators?pagination.limit=300`);
+    const data = await res.json();
+    const allValidators = data.validators || [];
+    const resolved = [];
+    
+    for (const name of TARGET_VALIDATORS) {
+      const match = allValidators.find(v => v.description.moniker.trim().toLowerCase() === name.toLowerCase());
+      if (match) {
+        resolved.push({ 
+            moniker: name, 
+            address: match.operator_address, 
+            status: match.status.replace("BOND_STATUS_", "") 
+        });
+      }
     }
+    return resolved;
+  } catch (err) {
+    console.log("  ❌ Gagal mengambil data validator.");
+    return [];
   }
-  return resolved;
 }
 
 // ─── 4. DELEGATE KE SEMUA TARGET ──────────────────────────────
@@ -166,11 +180,11 @@ async function main() {
     const choice = await askQuestion("\n Pilih menu (1/2/3): ");
 
     if (choice === "1") {
-      await delegateToAll(0.01);[cite: 1]
+      await delegateToAll(0.01);
     } else if (choice === "2") {
-      await delegateToAll(0.1);[cite: 1]
+      await delegateToAll(0.1);
     } else {
-      console.log("\n  Proses staking dilewati.");[cite: 1]
+      console.log("\n  Proses staking dilewati.");
     }
 
     console.log("\n✅ Selesai!\n");
